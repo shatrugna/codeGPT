@@ -4,6 +4,7 @@ from transformers import AdamW
 import datasets
 from datasets import load_dataset
 from transformers import GPT2Tokenizer
+import torch.cuda.amp as amp
 
 # Load the dataset
 dataset = load_dataset("Fsoft-AIC/the-vault-function", split_set=["train/small"], languages=['python'])
@@ -43,6 +44,8 @@ class CodeDataset(torch.utils.data.Dataset):
 
 train_dataset = CodeDataset(tokenized_dataset)
 
+scaler = amp.GradScaler() # Mixed precision training
+
 # Hyperparameters
 vocab_size = tokenizer.vocab_size
 embed_size = 256
@@ -54,7 +57,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = CodeGPT(vocab_size, embed_size, num_heads, num_layers, block_size).to(device)
 
 # DataLoader
-train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
 
 # Optimizer
 optimizer = AdamW(model.parameters(), lr=5e-5)
@@ -66,12 +69,14 @@ model.train()
 for epoch in range(num_epochs):
     for batch in train_loader:
         optimizer.zero_grad()
-        input_ids = batch["input_ids"].to(device)
-        labels = batch["labels"].to(device)
-        outputs = model(input_ids)
-        loss = F.cross_entropy(outputs.view(-1, vocab_size), labels.view(-1))
-        loss.backward()
-        optimizer.step()
+        with amp.autocast():
+            input_ids = batch["input_ids"].to(device)
+            labels = batch["labels"].to(device)
+            outputs = model(input_ids)
+            loss = F.cross_entropy(outputs.view(-1, vocab_size), labels.view(-1))
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
     loss = loss.to("cpu")
     print(f"Epoch {epoch+1}/{num_epochs}, Loss: {loss.item()}")
 
